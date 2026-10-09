@@ -3,7 +3,7 @@ import hashlib
 import json
 import os
 from datetime import date
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from pathlib import Path
 
 
@@ -132,12 +132,37 @@ def currency(value):
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def allocate_pro_rata(total, weights, quantum=Decimal("0.01")):
+    """Allocate a monetary total by non-negative weights with an exact checksum."""
+    total = money(total)
+    clean = {str(key): money(value) for key, value in weights.items()}
+    if total < 0 or not clean or any(value < 0 for value in clean.values()):
+        raise ValueError("Invalid pro-rata allocation")
+    denominator = sum(clean.values(), Decimal(0))
+    if denominator <= 0:
+        raise ValueError("Zero pro-rata denominator")
+    units = (total / quantum).quantize(Decimal("1"), rounding=ROUND_DOWN)
+    if units * quantum != total:
+        raise ValueError("Total is not representable in allocation quantum")
+    exact = {key: units * value / denominator for key, value in clean.items()}
+    allocated_units = {key: value.quantize(Decimal("1"), rounding=ROUND_DOWN)
+                       for key, value in exact.items()}
+    remaining = int(units - sum(allocated_units.values(), Decimal(0)))
+    order = sorted(clean, key=lambda key: (-(exact[key] - allocated_units[key]), key))
+    for key in order[:remaining]:
+        allocated_units[key] += 1
+    result = {key: value * quantum for key, value in allocated_units.items()}
+    if sum(result.values(), Decimal(0)) != total:
+        raise ValueError("Allocation checksum failed")
+    return result
+
+
 def reconcile(records, offers, item_pages, reviews, payer_id, payer_name,
               paid_from, paid_to):
     """Classification requires evidence for every invoice row.
 
-    Mixed invoices remain unresolved unless an evidenced payment allocation is
-    supplied separately. Never distribute partial payments pro rata silently.
+    Partial payments of reviewed mixed invoices are allocated by gross row value.
+    This is an explicit analytical policy, not a bank-confirmed item allocation.
     """
     start, end = date.fromisoformat(paid_from), date.fromisoformat(paid_to)
     if start > end:
@@ -215,17 +240,25 @@ def reconcile(records, offers, item_pages, reviews, payer_id, payer_name,
         if not review.get("evidence") or len(categories) != len(rows) or any(c not in allowed for c in categories):
             reject("classification_requires_evidence")
             continue
-        if len(set(categories)) != 1:
-            reject("mixed_invoice_requires_evidenced_payment_allocation")
+        weights = {}
+        for row, category in zip(rows, categories):
+            weights[category] = weights.get(category, Decimal(0)) + money(row.get("amount"))
+        try:
+            gross_allocation = allocate_pro_rata(amount, weights)
+            vat_allocation = allocate_pro_rata(vat, weights) if vat is not None else None
+        except ValueError:
+            reject("pro_rata_allocation_failed")
             continue
-        cat = categories[0]
-        bucket = totals.setdefault(str(cur), {}).setdefault(cat, {"gross": Decimal(0), "vat_known": Decimal(0), "vat_unknown_payments": 0, "payments": 0})
-        bucket["gross"] += amount
-        bucket["payments"] += 1
-        if vat is None:
-            bucket["vat_unknown_payments"] += 1
-        else:
-            bucket["vat_known"] += vat
+        mixed = len(weights) > 1
+        for cat, allocated in gross_allocation.items():
+            bucket = totals.setdefault(str(cur), {}).setdefault(cat, {"gross": Decimal(0), "vat_known": Decimal(0), "vat_unknown_payments": 0, "payments": 0, "pro_rata_payments": 0})
+            bucket["gross"] += allocated
+            bucket["payments"] += 1
+            bucket["pro_rata_payments"] += int(mixed)
+            if vat_allocation is None:
+                bucket["vat_unknown_payments"] += 1
+            else:
+                bucket["vat_known"] += vat_allocation[cat]
     rendered = {cur: {cat: {k: str(v) if isinstance(v, Decimal) else v for k, v in vals.items()} for cat, vals in cats.items()} for cur, cats in totals.items()}
     return {"status": "REVIEW_REQUIRED" if problems else "READY_FOR_RECONCILIATION",
             "input_payments": len(records), "amounts_by_currency_id": rendered,

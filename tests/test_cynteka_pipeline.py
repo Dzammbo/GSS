@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from cynteka_pipeline import money, stage_page, verify_export, reconcile
+from cynteka_pipeline import allocate_pro_rata, money, stage_page, verify_export, reconcile
 
 
 class NativePipelineTests(unittest.TestCase):
@@ -47,8 +47,8 @@ class NativePipelineTests(unittest.TestCase):
     def test_native_schema_payment_date_not_acceptance(self):
         p, o, rows, review = self.fixture()
         result = self.run_case(p, o, rows, review)
-        self.assertEqual(result["amounts_by_currency_id"]["643"]["materials"]["gross"], "122")
-        self.assertEqual(result["amounts_by_currency_id"]["643"]["materials"]["vat_known"], "22")
+        self.assertEqual(result["amounts_by_currency_id"]["643"]["materials"]["gross"], "122.00")
+        self.assertEqual(result["amounts_by_currency_id"]["643"]["materials"]["vat_known"], "22.00")
         self.assertFalse(result["final_result"])
         p["paymentDate"] = None
         p["accepted"] = True
@@ -62,12 +62,20 @@ class NativePipelineTests(unittest.TestCase):
         p["currency"] = 840
         self.assertEqual(self.run_case(p, o, rows, review)["problems"][0]["reason"], "unresolved_currency")
 
-    def test_mixed_invoice_not_silently_allocated(self):
+    def test_mixed_invoice_is_allocated_proportionally(self):
         p, o, rows, review = self.fixture()
         rows["items"] = [{"amount": "100"}, {"amount": "22"}]
         rows["count"] = 2
         review["row_categories"] = ["materials", "delivery"]
-        self.assertEqual(self.run_case(p, o, rows, review)["problems"][0]["reason"], "mixed_invoice_requires_evidenced_payment_allocation")
+        result = self.run_case(p, o, rows, review)
+        self.assertEqual(result["amounts_by_currency_id"]["643"]["materials"]["gross"], "100.00")
+        self.assertEqual(result["amounts_by_currency_id"]["643"]["delivery"]["gross"], "22.00")
+        self.assertEqual(result["amounts_by_currency_id"]["643"]["materials"]["pro_rata_payments"], 1)
+
+    def test_pro_rata_rounding_has_exact_checksum(self):
+        result = allocate_pro_rata("0.05", {"materials": "1", "delivery": "1", "services": "1"})
+        self.assertEqual(sum(result.values()), money("0.05"))
+        self.assertEqual(result, {"materials": money("0.02"), "delivery": money("0.02"), "services": money("0.01")})
 
     def test_unknown_vat_not_zero(self):
         p, o, rows, review = self.fixture()
