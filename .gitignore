@@ -1,0 +1,32 @@
+# Credentials and configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+credentials/
+
+# Raw and intermediate financial data
+data/
+raw/
+staging/
+exports/
+checkpoints/
+output/
+reports/
+*.sqlite
+*.sqlite3
+*.db
+*.xlsx
+*.xls
+*.csv
+*.parquet
+*.jsonl
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
